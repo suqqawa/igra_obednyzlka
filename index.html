@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+<!-- ВАЖНО: base помогает корректно работать путям на GitHub Pages -->
+<base href="./">
+
+<title>Merge & Renovate - Crystal Clear</title>
+
+<script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser-arcade-physics.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+
+<style>
+body { 
+    margin: 0; 
+    background: #1a1a1a; 
+    overflow: hidden; 
+    font-family: 'Inter', sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+}
+#game-wrapper {
+    position: relative;
+    width: 100%;
+    max-width: 450px; 
+    aspect-ratio: 9 / 16; 
+    max-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+#game-container {
+    width: 100%;
+    height: 100%;
+}
+canvas {
+    border-radius: 12px;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+}
+#cheat-menu {
+    transition: transform 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+.menu-hidden { transform: translateY(-150%); }
+.menu-visible { transform: translateY(0); }
+</style>
+</head>
+
+<body>
+
+<div id="game-wrapper">
+
+<div id="ui-layer" class="absolute top-0 left-0 w-full p-4 pointer-events-none flex justify-between items-start z-50">
+
+<div class="bg-white/90 backdrop-blur rounded-full px-3 py-1.5 shadow-lg flex items-center gap-2 pointer-events-auto">
+<span class="text-yellow-500 font-bold">⭐</span>
+<span id="star-count" class="font-bold text-slate-800">0</span>
+</div>
+
+<div class="flex gap-2 pointer-events-auto">
+<button id="merge-btn" class="bg-amber-800 text-white rounded-full px-4 py-1.5 shadow-lg font-bold text-sm hover:bg-amber-700 transition">Merge</button>
+<button id="house-btn" class="bg-amber-800 text-white rounded-full px-4 py-1.5 shadow-lg font-bold text-sm hover:bg-amber-700 transition">House</button>
+</div>
+
+<div id="energy-panel" class="bg-white/90 backdrop-blur rounded-full px-3 py-1.5 shadow-lg flex items-center gap-2 pointer-events-auto cursor-pointer active:scale-95 transition">
+<span class="text-blue-500 font-bold">⚡</span>
+<span id="energy-count" class="font-bold text-slate-800">100</span>
+</div>
+
+</div>
+
+<div id="cheat-menu" class="absolute top-16 right-4 w-40 bg-white/95 backdrop-blur p-3 rounded-xl shadow-2xl z-[60] menu-hidden pointer-events-auto">
+
+<p class="text-[10px] text-slate-400 mb-1 font-bold uppercase text-center">Admin Panel</p>
+
+<input type="text" id="cheat-input" placeholder="Код..." class="w-full px-2 py-1 text-sm border border-slate-200 rounded-lg mb-2 outline-none focus:ring-2 ring-blue-500">
+
+<button id="cheat-submit" class="w-full bg-blue-600 text-white text-xs py-1.5 rounded-lg font-bold hover:bg-blue-700">
+Восстановить
+</button>
+
+</div>
+
+<div id="game-container"></div>
+
+</div>
+
+<script>
+
+// ========================================================
+// НАСТРОЙКА ПУТЕЙ (GitHub Pages friendly)
+// ========================================================
+
+const ASSET_BASE = "./";
+
+function asset(path){
+    return ASSET_BASE + path;
+}
+
+const CUSTOM_ASSETS = {
+spawners: {
+red: asset('assets/food/pan_food.png'),
+green: asset('assets/cosm/cosm_box.png'),
+blue: ''
+},
+items: {
+red: [
+asset('assets/food/1level.png'),
+asset('assets/food/2level.png'),
+asset('assets/food/3level.png'),
+asset('assets/food/4level.png'),
+asset('assets/food/5level.png'),
+asset('assets/food/6level.png'),
+asset('assets/food/7level.png')
+],
+green: [asset('assets/cosm/1level.png'), '', '', '', '', '', ''],
+blue: ['', '', '', '', '', '', '']
+}
+};
+const GRID_SIZE = { rows: 9, cols: 7 };
+const CELL_SIZE = 55;
+const OFFSET_X = (450 - (GRID_SIZE.cols * CELL_SIZE)) / 2;
+const OFFSET_Y = 170;
+
+const COLORS = { beige: 0xdfd3c3, beigeLight: 0xf0ece1, brown: 0x5d4037 };
+
+const ITEM_DB = {};
+['red', 'green', 'blue'].forEach(cat => {
+    for (let lvl = 1; lvl <= 7; lvl++) {
+        ITEM_DB[`${cat}_${lvl}`] = { level: lvl, next: lvl < 7 ? `${cat}_${lvl+1}` : null };
+    }
+});
+
+const HOUSE_TASKS = [
+    { id: 1, name: 'Починить пол', cost: 15, texture: 'floor_clean' },
+    { id: 2, name: 'Купить диван', cost: 40, texture: 'couch' },
+    { id: 3, name: 'Лампа в угол', cost: 60, texture: 'lamp' }
+];
+
+// ========================================================
+// СИСТЕМА СОХРАНЕНИЯ С РЕГЕНЕРАЦИЕЙ
+// ========================================================
+class SaveSystem {
+    constructor() { this.data = this.load(); }
+    load() {
+        const saved = localStorage.getItem('merge_renovate_v7');
+        let data = saved ? JSON.parse(saved) : { 
+            stars: 0, 
+            energy: 100, 
+            items: [], 
+            tasks: [], 
+            order: null, 
+            lastTime: Date.now() 
+        };
+        
+        // Расчет восстановления энергии в офлайне (1 ед. / 120 сек)
+        const now = Date.now();
+        const elapsed = now - (data.lastTime || now);
+        const recovered = Math.floor(elapsed / 120000);
+        
+        if (recovered > 0 && data.energy < 100) {
+            data.energy = Math.min(100, data.energy + recovered);
+            data.lastTime = now;
+        }
+        return data;
+    }
+    save() { 
+        this.data.lastTime = Date.now();
+        localStorage.setItem('merge_renovate_v7', JSON.stringify(this.data)); 
+    }
+}
+const storage = new SaveSystem();
+
+// Цикл регенерации в реальном времени (раз в 10 секунд проверяем состояние)
+setInterval(() => {
+    const now = Date.now();
+    const elapsed = now - storage.data.lastTime;
+    if (elapsed >= 120000 && storage.data.energy < 100) {
+        storage.data.energy++;
+        storage.save();
+        updateUIValues();
+    }
+}, 10000);
+
+function updateUIValues() {
+    const starEl = document.getElementById('star-count');
+    const energyEl = document.getElementById('energy-count');
+    if(starEl) starEl.innerText = storage.data.stars;
+    if(energyEl) energyEl.innerText = storage.data.energy;
+}
+
+// ========================================================
+// ФУНКЦИОНАЛ ЧИТ-МЕНЮ
+// ========================================================
+document.getElementById('energy-panel').onclick = () => {
+    const menu = document.getElementById('cheat-menu');
+    menu.classList.toggle('menu-hidden');
+    menu.classList.toggle('menu-visible');
+};
+
+document.getElementById('cheat-submit').onclick = () => {
+    const input = document.getElementById('cheat-input');
+    const menu = document.getElementById('cheat-menu');
+    if (input.value === 'givepls') {
+        storage.data.energy = 100;
+        storage.save();
+        updateUIValues();
+        input.value = '';
+        menu.classList.add('menu-hidden');
+        menu.classList.remove('menu-visible');
+        alert('Энергия восстановлена!');
+    } else {
+        alert('Неверный код');
+    }
+};
+
+// Остальной код Phaser без изменений функционала
+class PreloadScene extends Phaser.Scene {
+    constructor() { super('PreloadScene'); }
+    preload() {
+        this.load.image('custom_bg', 'https://avatars.mds.yandex.net/i?id=a02f3ff0c588fb2446f0115f5ef4ace78040d768-10697312-images-thumbs&n=13');
+        this.generateGameTextures();
+    }
+    create() { this.scene.start('MergeScene'); }
+    generateGameTextures() {
+        const spawnerColors = { red: 0xef4444, green: 0x22c55e, blue: 0x3b82f6 };
+        ['red', 'green', 'blue'].forEach(cat => {
+            let path = CUSTOM_ASSETS.spawners[cat];
+            if (path && path.trim() !== '') {
+                this.load.image(`spawner_${cat}`, path);
+            } else {
+                let g = this.add.graphics();
+                g.fillStyle(spawnerColors[cat]).fillRoundedRect(0, 0, 90, 60, 15).lineStyle(3, 0xffffff).strokeRoundedRect(0, 0, 90, 60, 15);
+                g.generateTexture(`spawner_${cat}`, 90, 60); g.destroy();
+            }
+        });
+        ['red', 'green', 'blue'].forEach(cat => {
+            for (let lvl = 1; lvl <= 7; lvl++) {
+                let path = CUSTOM_ASSETS.items[cat][lvl-1];
+                let key = `${cat}_${lvl}`;
+                if (path && path.trim() !== '') {
+                    this.load.image(key, path);
+                } else {
+                    let g = this.add.graphics();
+                    g.fillStyle(0x888888).fillRoundedRect(0, 0, 48, 48, 10).lineStyle(2, 0xffffff, 0.8).strokeRoundedRect(0, 0, 48, 48, 10);
+                    g.generateTexture(key, 48, 48); g.destroy();
+                }
+            }
+        });
+        let f = this.add.graphics();
+        f.fillStyle(0x6d4c41).beginPath().moveTo(40,0).lineTo(80,20).lineTo(40,40).lineTo(0,20).closePath().fill();
+        f.generateTexture('floor_dirty', 80, 40);
+        f.clear().fillStyle(0xb2dfdb).beginPath().moveTo(40,0).lineTo(80,20).lineTo(40,40).lineTo(0,20).closePath().fill();
+        f.generateTexture('floor_clean', 80, 40);
+        let c = this.add.graphics().fillStyle(0x5c6bc0).fillRect(0,10,60,30).fillStyle(0x3f51b5).fillRect(0,0,60,10);
+        c.generateTexture('couch', 60, 40);
+        let l = this.add.graphics().fillStyle(0xffeb3b).fillCircle(10,10,10).fillStyle(0x424242).fillRect(8,20,4,20);
+        l.generateTexture('lamp', 20, 40);
+        [f, c, l].forEach(g => g.destroy());
+    }
+}
+
+class MergeScene extends Phaser.Scene {
+    constructor() { super('MergeScene'); }
+    create() {
+        this.items = [];
+        updateUIValues();
+        this.add.rectangle(225, 400, 450, 800, 0x3e2723);
+        this.add.image(225, 400, 'custom_bg').setDisplaySize(450, 800).setAlpha(0.3);
+        let gridW = GRID_SIZE.cols * CELL_SIZE;
+        let gridH = GRID_SIZE.rows * CELL_SIZE;
+        let gridBg = this.add.graphics();
+        gridBg.fillStyle(COLORS.beige, 1).fillRoundedRect(OFFSET_X - 10, OFFSET_Y - 10, gridW + 20, gridH + 20, 15);
+        gridBg.lineStyle(4, COLORS.brown, 1).strokeRoundedRect(OFFSET_X - 10, OFFSET_Y - 10, gridW + 20, gridH + 20, 15);
+        for(let r=0; r<GRID_SIZE.rows; r++) {
+            for(let c=0; c<GRID_SIZE.cols; c++) {
+                this.add.rectangle(OFFSET_X + c*CELL_SIZE + CELL_SIZE/2, OFFSET_Y + r*CELL_SIZE + CELL_SIZE/2, CELL_SIZE - 4, CELL_SIZE - 4, COLORS.beigeLight, 0.5);
+            }
+        }
+        this.order = storage.data.order || this.generateNewOrder();
+        this.drawOrderUI();
+        this.createSpawners();
+        storage.data.items.forEach(i => { if (ITEM_DB[i.type]) this.spawnItem(i.c, i.r, i.type); });
+        this.input.on('drag', (p, obj, dx, dy) => {
+            obj.x = dx; obj.y = dy;
+            if(obj.getData('text')) obj.getData('text').setPosition(dx, dy);
+            obj.setDepth(100);
+        });
+        this.input.on('dragend', this.handleDrop, this);
+        document.getElementById('merge-btn').onclick = () => this.scene.start('MergeScene');
+        document.getElementById('house-btn').onclick = () => this.scene.start('HouseScene');
+    }
+    generateNewOrder() {
+        const types = Object.keys(ITEM_DB);
+        const type = types[Math.floor(Math.random() * types.length)];
+        return { type, reward: ITEM_DB[type].level * 15 };
+    }
+    drawOrderUI() {
+        if(this.orderContainer) this.orderContainer.destroy();
+        this.orderContainer = this.add.container(225, 85);
+        let shape = this.add.graphics().fillStyle(COLORS.beige, 1).fillRoundedRect(-180, -40, 360, 80, 20).lineStyle(4, COLORS.brown, 1).strokeRoundedRect(-180, -40, 360, 80, 20);
+        let icon = this.add.image(-130, 0, this.order.type).setDisplaySize(55, 55);
+        let info = this.add.text(-85, -18, `ЗАКАЗ: Lvl ${ITEM_DB[this.order.type].level}`, {color: '#5d4037', fontSize: '18px', fontWeight: 'bold'});
+        let reward = this.add.text(-85, 8, `НАГРАДА: ⭐${this.order.reward}`, {color: '#854d0e', fontSize: '20px', fontWeight: '900'});
+        this.orderContainer.add([shape, icon, info, reward]);
+    }
+    createSpawners() {
+        const spawns = [{ type: 'red_1', id: 'red', x: 100 }, { type: 'green_1', id: 'green', x: 225 }, { type: 'blue_1', id: 'blue', x: 350 }];
+        spawns.forEach(s => {
+            let btn = this.add.container(s.x, 720);
+            let img = this.add.image(0, 0, `spawner_${s.id}`).setDisplaySize(90, 60);
+            let hitArea = this.add.rectangle(0, 0, 90, 60, 0x000, 0).setInteractive();
+            let txt = this.add.text(0, 15, "⚡1", {fontSize: '16px', fontWeight: 'bold', color: '#fff', stroke: '#000', strokeThickness: 3}).setOrigin(0.5);
+            btn.add([img, hitArea, txt]);
+            hitArea.on('pointerdown', () => this.trySpawn(s.type));
+        });
+    }
+    spawnItem(c, r, type) {
+        const x = OFFSET_X + c*CELL_SIZE + CELL_SIZE/2, y = OFFSET_Y + r*CELL_SIZE + CELL_SIZE/2;
+        let item = this.add.image(x, y, type).setInteractive({draggable: true}).setDisplaySize(50, 50);
+        let text = this.add.text(x, y, ITEM_DB[type].level, {fontSize: '16px', color: '#fff', stroke: '#000', strokeThickness: 3}).setOrigin(0.5);
+        item.setData({c, r, type, text});
+        this.items.push(item);
+    }
+    trySpawn(type) {
+        if (storage.data.energy <= 0) return;
+        let occupied = this.items.map(i => `${i.getData('c')},${i.getData('r')}`);
+        let emptyCells = [];
+        for(let r=0; r<GRID_SIZE.rows; r++) for(let c=0; c<GRID_SIZE.cols; c++) if (!occupied.includes(`${c},${r}`)) emptyCells.push({c, r});
+        if (emptyCells.length > 0) {
+            let cell = emptyCells[Math.floor(Math.random() * emptyCells.length)];
+            storage.data.energy--; updateUIValues(); this.spawnItem(cell.c, cell.r, type);
+            this.saveState();
+        }
+    }
+    handleDrop(pointer, obj) {
+        obj.setDepth(1);
+        if (Math.abs(obj.y - 85) < 50 && obj.getData('type') === this.order.type) {
+            storage.data.stars += this.order.reward;
+            this.removeItem(obj); this.order = this.generateNewOrder(); this.drawOrderUI();
+            updateUIValues(); this.saveState(); return;
+        }
+        let nc = Math.round((obj.x - OFFSET_X - CELL_SIZE/2) / CELL_SIZE), nr = Math.round((obj.y - OFFSET_Y - CELL_SIZE/2) / CELL_SIZE);
+        let target = this.items.find(i => i !== obj && i.getData('c') === nc && i.getData('r') === nr);
+        if (target && target.getData('type') === obj.getData('type') && ITEM_DB[obj.getData('type')].next) {
+            let nextType = ITEM_DB[obj.getData('type')].next;
+            this.removeItem(obj); this.removeItem(target); this.spawnItem(nc, nr, nextType);
+        } else if (nc >= 0 && nc < GRID_SIZE.cols && nr >= 0 && nr < GRID_SIZE.rows && !target) {
+            obj.setData('c', nc); obj.setData('r', nr);
+        }
+        this.tweens.add({ targets: [obj, obj.getData('text')], x: OFFSET_X + obj.getData('c')*CELL_SIZE + CELL_SIZE/2, y: OFFSET_Y + obj.getData('r')*CELL_SIZE + CELL_SIZE/2, duration: 150 });
+        this.saveState();
+    }
+    removeItem(item) { if(item.getData('text')) item.getData('text').destroy(); this.items = this.items.filter(i => i !== item); item.destroy(); }
+    saveState() { storage.data.items = this.items.map(i => ({ c: i.getData('c'), r: i.getData('r'), type: i.getData('type') })); storage.data.order = this.order; storage.save(); }
+}
+
+class HouseScene extends Phaser.Scene {
+    constructor() { super('HouseScene'); }
+    create() {
+        this.add.rectangle(225, 400, 450, 800, 0x5d4037);
+        this.add.text(225, 60, "МОЙ ДОМ", {fontSize: '32px', fontWeight: 'bold', color: '#fff'}).setOrigin(0.5);
+        const startX = 225, startY = 260;
+        for(let r=0; r<5; r++) for(let c=0; c<5; c++) this.add.image(startX + (c-r)*40, startY + (c+r)*20, storage.data.tasks.includes(1) ? 'floor_clean' : 'floor_dirty');
+        if (storage.data.tasks.includes(2)) this.add.image(startX, startY + 40, 'couch').setOrigin(0.5, 1);
+        if (storage.data.tasks.includes(3)) this.add.image(startX + 60, startY + 20, 'lamp').setOrigin(0.5, 1);
+        this.add.graphics().fillStyle(COLORS.beige, 1).fillRoundedRect(25, 520, 400, 240, 20).lineStyle(4, COLORS.brown).strokeRoundedRect(25, 520, 400, 240, 20);
+        this.add.text(225, 550, "СПИСОК РАБОТ", {color: '#5d4037', fontSize: '22px', fontWeight: 'bold'}).setOrigin(0.5);
+        HOUSE_TASKS.forEach((task, i) => {
+            let isBought = storage.data.tasks.includes(task.id), y = 600 + i * 50;
+            this.add.text(55, y, task.name, {color: isBought ? '#8d6e63' : '#3e2723', fontSize: '18px'});
+            if (!isBought) {
+                let btn = this.add.rectangle(350, y + 10, 90, 35, 0x854d0e).setInteractive();
+                this.add.text(350, y + 10, `⭐${task.cost}`, {color: '#fff', fontWeight: 'bold'}).setOrigin(0.5);
+                btn.on('pointerdown', () => { if (storage.data.stars >= task.cost) { storage.data.stars -= task.cost; storage.data.tasks.push(task.id); storage.save(); this.scene.restart(); }});
+            } else this.add.text(350, y + 10, "ГОТОВО", {color: '#15803d', fontWeight: 'bold'}).setOrigin(0.5);
+        });
+        document.getElementById('merge-btn').onclick = () => this.scene.start('MergeScene');
+        document.getElementById('house-btn').onclick = () => this.scene.start('HouseScene');
+    }
+}
+
+const config = {
+    type: Phaser.AUTO, parent: 'game-container', pixelArt: true, antialias: false, roundPixels: true,
+    scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH, width: 450, height: 800 },
+    backgroundColor: '#2c2c2c', scene: [PreloadScene, MergeScene, HouseScene]
+};
+const game = new Phaser.Game(config);
+</script>
+</body>
+</html>
